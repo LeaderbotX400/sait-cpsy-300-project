@@ -1,0 +1,37 @@
+{
+  "version": "5",
+  "specifiers": {
+    "jsr:@std/csv@*": "1.0.6",
+    "jsr:@std/streams@^1.0.9": "1.2.0"
+  },
+  "jsr": {
+    "@std/csv@1.0.6": {
+      "integrity": "52ef0e62799a0028d278fa04762f17f9bd263fad9a8e7f98c14fbd371d62d9fd",
+      "dependencies": [
+        "jsr:@std/streams"
+      ]
+    },
+    "@std/streams@1.2.0": {
+      "integrity": "256b934254778f2bf45f5713b934209ff29e9b4b7fd4ec095219966813758c5f"
+    }
+  },
+  "workspace": {
+    "packageJson": {
+      "dependencies": [
+        "npm:@tailwindcss/turbopack@4",
+        "npm:@types/node@20",
+        "npm:@types/react-dom@19",
+        "npm:@types/react@19",
+        "npm:eslint-config-next@16.4.2",
+        "npm:eslint@9",
+        "npm:next@16.4.2",
+        "npm:papaparse@^5.7.0",
+        "npm:react-dom@19.3.0",
+        "npm:react@19.3.0",
+        "npm:recharts@^3.10.1",
+        "npm:tailwindcss@4",
+        "npm:typescript@5"
+      ]
+    }
+  }
+}
