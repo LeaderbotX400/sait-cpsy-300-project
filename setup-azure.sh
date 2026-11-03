@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # CPSY 300 Project Phase 1 — automates the Azure side of Parts D and E.
 #
+#   up    (default) create everything below; safe to re-run
+#   down  delete the whole resource group rg-cpsy300-project-<team>
+#         (asks you to type the group's name first)
+#
+# up does:
 #   D1  resource group + Standard container registry
 #   D2  first image (recipes:v1) built locally and pushed
 #   D3  Container Apps environment
@@ -10,12 +15,15 @@
 #   E4  Contributor on the project resource group only, then prints the three GitHub secrets
 #   E5  (optional, --set-gh-secrets) writes those secrets with the gh CLI
 #
-# Safe to re-run: every step checks whether its resource already exists first.
-# It never deletes anything (Phase 2 and 3 build on all of it).
+# up is safe to re-run: every step checks whether its resource already exists first.
+# down removes EVERYTHING up made. The brief says to keep it all after the Phase 1
+# hand-in (Phases 2 and 3 build on it). After a down, up starts over with a new
+# registry name and a new pipeline identity; pass --set-gh-secrets to update the
+# GitHub secrets. deploy.yml looks up the registry name itself.
 #
-# Not automated (the brief wants them done by hand / they are GitHub-side):
-#   S2/S4 repo + branch protection, Part C Dockerfile, E2 whoami workflow,
-#   E6 deploy.yml (the env: block is printed at the end), D5 revision demo.
+# In the repo, not here: Dockerfile (Part C), .github/workflows/ci.yml (PR checks),
+# .github/workflows/deploy.yml (E6; finds the registry by name prefix).
+# Not automated: S2/S4 repo + branch protection, E2 whoami workflow, D5 revision demo.
 #
 # Requirements: az (logged in to the HOST's subscription), curl.
 # Docker is needed only when recipes:v1 is not yet in the registry
@@ -25,10 +33,10 @@
 #
 # NixOS on WSL: Docker Desktop's own docker binary segfaults there, so take the
 # client from nixpkgs (needs wsl.docker-desktop.enable = true for /var/run/docker.sock):
-#   nix shell nixpkgs#docker-client nixpkgs#docker-buildx -c ./setup-azure.sh ...
+#   devenv shell -- ./setup-azure.sh ...   (devenv.nix provides az, gh, curl, docker)
 #
 # Usage:
-#   ./setup-azure.sh --team kale --github <owner>/cpsy300-kale \
+#   ./setup-azure.sh [up|down] --team kale --github <owner>/cpsy300-kale \
 #       [--location canadacentral] [--title "Kale's recipe insights"] \
 #       [--repo-dir ~/cpsy300/cpsy300-kale] [--set-gh-secrets]
 
@@ -42,7 +50,8 @@ GITHUB_REPO="LeaderbotX400/sait-cpsy-300-project"
 LOCATION="canadacentral"
 TITLE=""
 REPO_DIR="."
-SET_GH_SECRETS=true
+SET_GH_SECRETS=false
+ACTION=up
 
 usage() { sed -n '2,/^$/p' "$0"| sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 die()   { echo "ERROR: $*" >&2; exit 1; }
@@ -53,6 +62,7 @@ azq() { az "$@" | tr -d '\r'; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    up|down)          ACTION="$1"; shift ;;
     --team)           TEAM="${2:-}"; shift 2 ;;
     --github)         GITHUB_REPO="${2:-}"; shift 2 ;;
     --location)       LOCATION="${2:-}"; shift 2 ;;
@@ -71,10 +81,11 @@ done
   || echo "WARNING: repo name '${GITHUB_REPO#*/}' is not cpsy300-$TEAM as the brief asks."
 [[ -n "$TITLE" ]] || TITLE="Recipe insights — $TEAM"
 
-for cmd in az curl; do
-  command -v "$cmd" >/dev/null || die "'$cmd' is not installed."
-done
-$SET_GH_SECRETS && { command -v gh >/dev/null || die "--set-gh-secrets needs the gh CLI."; }
+command -v az >/dev/null || die "'az' is not installed."
+if [[ "$ACTION" == up ]]; then
+  command -v curl >/dev/null || die "'curl' is not installed."
+  if $SET_GH_SECRETS; then command -v gh >/dev/null || die "--set-gh-secrets needs the gh CLI."; fi
+fi
 
 RG="rg-cpsy300-project-$TEAM"
 ENV_NAME="cae-cpsy300-$TEAM"
@@ -92,6 +103,27 @@ TENANT=$(azq account show --query tenantId -o tsv)
 echo "Subscription: $(azq account show --query name -o tsv) ($SUB)"
 read -r -p "Is this the HOST's Azure for Students subscription? [y/N] " ok
 [[ "$ok" =~ ^[Yy]$ ]] || die "Switch with: az account set --subscription <id>"
+
+# ---------------------------------------------------------------- down
+if [[ "$ACTION" == down ]]; then
+  step "Deleting resource group $RG"
+  if [[ "$(azq group exists -n "$RG")" != "true" ]]; then
+    echo "  $RG does not exist — nothing to delete."
+    exit 0
+  fi
+  az resource list -g "$RG" -o table
+  cat <<EOF
+
+WARNING: this deletes everything above, for good. The brief says to keep it
+all after the Phase 1 hand-in (Phases 2 and 3 build on it).
+EOF
+  read -r -p "Type the resource group name to confirm: " confirm
+  [[ "$confirm" == "$RG" ]] || die "Name did not match; nothing deleted."
+  echo "  deleting (several minutes) ..."
+  az group delete -n "$RG" --yes
+  echo "  deleted. Run '$0 up --set-gh-secrets' to create it all again."
+  exit 0
+fi
 
 step "Registering resource providers (first time can take a few minutes)"
 for ns in Microsoft.ContainerRegistry Microsoft.App Microsoft.OperationalInsights Microsoft.ManagedIdentity; do
@@ -120,7 +152,7 @@ else
   # One Standard registry per student subscription is free; a second one is billed daily.
   OTHER=$(azq acr list --query "[?sku.name=='Standard'].name" -o tsv)
   if [[ -n "$OTHER" ]]; then
-    echo "Existing Standard registries in this subscription:"; echo "$OTHER" | sed 's/^/  /'
+    echo "Existing Standard registries in this subscription:"; while read -r r; do echo "  $r"; done <<<"$OTHER"
     die "Delete the old (Lab 2/class) registry first, or one of them is charged every day."
   fi
   for _ in 1 2 3 4 5; do
@@ -141,7 +173,7 @@ step "D2 · First image $LOGIN_SERVER/$IMAGE_REPO:$IMAGE_TAG"
 if azq acr repository show-tags -n "$ACR" --repository "$IMAGE_REPO" -o tsv 2>/dev/null | grep -qx "$IMAGE_TAG"; then
   echo "  already in the registry"
 else
-  command -v docker >/dev/null && docker info >/dev/null 2>&1 \
+  { command -v docker >/dev/null && docker info >/dev/null 2>&1; } \
     || die "recipes:v1 is not in $ACR yet and Docker is not running here. Run this script on the host's laptop with Docker Desktop started (Cloud Shell has no Docker)."
   [[ -f "$REPO_DIR/Dockerfile" ]] \
     || die "No Dockerfile in '$REPO_DIR'. Pass --repo-dir pointing at the up-to-date main checkout (Part C must be merged)."
@@ -155,18 +187,77 @@ fi
 
 # ---------------------------------------------------------------- D3
 step "D3 · Container Apps environment $ENV_NAME"
+# `az containerapp env create` (az 2.86) now gets an Express environment, which
+# rejects the managed-identity registry pull D4 needs, and has no flag to say
+# otherwise. So create it from an ARM template with environmentMode set to
+# WorkloadProfiles (the brief's Consumption environment). listKeys() reads the
+# Log Analytics key inside Azure, so it never reaches this script.
+ENV_API=2026-07-01
 if az containerapp env show -n "$ENV_NAME" -g "$RG" -o none 2>/dev/null; then
   echo "  exists"
 else
   echo "  creating (a few minutes) ..."
-  az containerapp env create -n "$ENV_NAME" -g "$RG" -l "$LOCATION" -o none
+  TEMPLATE=$(mktemp --suffix=.json)
+  trap 'rm -f "$TEMPLATE"' EXIT
+  cat >"$TEMPLATE" <<EOF
+{
+  "\$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2023-09-01",
+      "name": "law-cpsy300-$TEAM",
+      "location": "$LOCATION",
+      "properties": { "sku": { "name": "PerGB2018" }, "retentionInDays": 30 }
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "$ENV_API",
+      "name": "$ENV_NAME",
+      "location": "$LOCATION",
+      "dependsOn": [ "[resourceId('Microsoft.OperationalInsights/workspaces', 'law-cpsy300-$TEAM')]" ],
+      "properties": {
+        "environmentMode": "WorkloadProfiles",
+        "workloadProfiles": [ { "name": "Consumption", "workloadProfileType": "Consumption" } ],
+        "appLogsConfiguration": {
+          "destination": "log-analytics",
+          "logAnalyticsConfiguration": {
+            "customerId": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', 'law-cpsy300-$TEAM'), '2023-09-01').customerId]",
+            "sharedKey": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', 'law-cpsy300-$TEAM'), '2023-09-01').primarySharedKey]"
+          }
+        }
+      }
+    }
+  ]
+}
+EOF
+  az deployment group create -g "$RG" -n "cae-cpsy300-$TEAM" --template-file "$TEMPLATE" -o none
 fi
 ENV_ID=$(azq containerapp env show -n "$ENV_NAME" -g "$RG" --query id -o tsv)
+ENV_MODE=$(azq rest --method get --url "https://management.azure.com$ENV_ID?api-version=$ENV_API" \
+             --query properties.environmentMode -o tsv)
+echo "  mode: $ENV_MODE"
+if [[ "$ENV_MODE" == "Express" ]]; then
+  cat >&2 <<EOF
+ERROR: $ENV_NAME is an Express environment. Express rejects the managed-identity
+registry pull (ExpressRegistrySystemIdentityNotSupported). Delete the app and the
+environment, then re-run this script; it recreates the environment in the right mode:
+  az containerapp delete -n $APP -g $RG --yes
+  az containerapp env delete -n $ENV_NAME -g $RG --yes
+EOF
+  exit 1
+fi
 
 # ---------------------------------------------------------------- D4
 step "D4 · Container app $APP"
 if az containerapp show -n "$APP" -g "$RG" -o none 2>/dev/null; then
-  # Leave it alone: after Part E the pipeline owns the image tag.
+  # A create that failed halfway leaves the app on Azure's placeholder image.
+  if azq containerapp show -n "$APP" -g "$RG" --query "properties.template.containers[0].image" -o tsv \
+       | grep -q '^mcr.microsoft.com/k8se/quickstart'; then
+    die "$APP is half-created (placeholder image). Delete it and re-run: az containerapp delete -n $APP -g $RG --yes"
+  fi
+  # Otherwise leave it alone: after Part E the pipeline owns the image tag.
   echo "  exists — not touched"
 else
   echo "  creating (3-5 minutes) ..."
@@ -281,13 +372,10 @@ Send privately; never commit or screenshot these:
   AZURE_SUBSCRIPTION_ID=$SUB
 $($SET_GH_SECRETS && echo "  (already written to $GITHUB_REPO with gh)")
 
-The env: block for .github/workflows/deploy.yml (E6):
-  env:
-    ACR_NAME: $ACR
-    RESOURCE_GROUP: $RG
-    CONTAINERAPP: $APP
+deploy.yml (E6) needs RESOURCE_GROUP: $RG and CONTAINERAPP: $APP
+(it finds the registry, $ACR, by itself).
 
 Still by hand: D5 (new revision with a different DASHBOARD_TITLE, screenshots),
-E2 whoami workflow if your instructor wants to see it, E6/E7 pipeline PRs.
+E2 whoami workflow if your instructor wants to see it, E7 visible-change PR.
 ================================================================
 EOF
