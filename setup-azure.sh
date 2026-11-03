@@ -187,18 +187,77 @@ fi
 
 # ---------------------------------------------------------------- D3
 step "D3 · Container Apps environment $ENV_NAME"
+# `az containerapp env create` (az 2.86) now gets an Express environment, which
+# rejects the managed-identity registry pull D4 needs, and has no flag to say
+# otherwise. So create it from an ARM template with environmentMode set to
+# WorkloadProfiles (the brief's Consumption environment). listKeys() reads the
+# Log Analytics key inside Azure, so it never reaches this script.
+ENV_API=2026-07-01
 if az containerapp env show -n "$ENV_NAME" -g "$RG" -o none 2>/dev/null; then
   echo "  exists"
 else
   echo "  creating (a few minutes) ..."
-  az containerapp env create -n "$ENV_NAME" -g "$RG" -l "$LOCATION" -o none
+  TEMPLATE=$(mktemp --suffix=.json)
+  trap 'rm -f "$TEMPLATE"' EXIT
+  cat >"$TEMPLATE" <<EOF
+{
+  "\$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2023-09-01",
+      "name": "law-cpsy300-$TEAM",
+      "location": "$LOCATION",
+      "properties": { "sku": { "name": "PerGB2018" }, "retentionInDays": 30 }
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "$ENV_API",
+      "name": "$ENV_NAME",
+      "location": "$LOCATION",
+      "dependsOn": [ "[resourceId('Microsoft.OperationalInsights/workspaces', 'law-cpsy300-$TEAM')]" ],
+      "properties": {
+        "environmentMode": "WorkloadProfiles",
+        "workloadProfiles": [ { "name": "Consumption", "workloadProfileType": "Consumption" } ],
+        "appLogsConfiguration": {
+          "destination": "log-analytics",
+          "logAnalyticsConfiguration": {
+            "customerId": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', 'law-cpsy300-$TEAM'), '2023-09-01').customerId]",
+            "sharedKey": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', 'law-cpsy300-$TEAM'), '2023-09-01').primarySharedKey]"
+          }
+        }
+      }
+    }
+  ]
+}
+EOF
+  az deployment group create -g "$RG" -n "cae-cpsy300-$TEAM" --template-file "$TEMPLATE" -o none
 fi
 ENV_ID=$(azq containerapp env show -n "$ENV_NAME" -g "$RG" --query id -o tsv)
+ENV_MODE=$(azq rest --method get --url "https://management.azure.com$ENV_ID?api-version=$ENV_API" \
+             --query properties.environmentMode -o tsv)
+echo "  mode: $ENV_MODE"
+if [[ "$ENV_MODE" == "Express" ]]; then
+  cat >&2 <<EOF
+ERROR: $ENV_NAME is an Express environment. Express rejects the managed-identity
+registry pull (ExpressRegistrySystemIdentityNotSupported). Delete the app and the
+environment, then re-run this script; it recreates the environment in the right mode:
+  az containerapp delete -n $APP -g $RG --yes
+  az containerapp env delete -n $ENV_NAME -g $RG --yes
+EOF
+  exit 1
+fi
 
 # ---------------------------------------------------------------- D4
 step "D4 · Container app $APP"
 if az containerapp show -n "$APP" -g "$RG" -o none 2>/dev/null; then
-  # Leave it alone: after Part E the pipeline owns the image tag.
+  # A create that failed halfway leaves the app on Azure's placeholder image.
+  if azq containerapp show -n "$APP" -g "$RG" --query "properties.template.containers[0].image" -o tsv \
+       | grep -q '^mcr.microsoft.com/k8se/quickstart'; then
+    die "$APP is half-created (placeholder image). Delete it and re-run: az containerapp delete -n $APP -g $RG --yes"
+  fi
+  # Otherwise leave it alone: after Part E the pipeline owns the image tag.
   echo "  exists — not touched"
 else
   echo "  creating (3-5 minutes) ..."
