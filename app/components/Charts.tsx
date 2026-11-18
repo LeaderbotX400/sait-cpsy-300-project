@@ -1,13 +1,13 @@
-"use client";
-
-// CPSY 300 Team Project, Phase 1 — GIVEN CODE. Copy this file into your project exactly where the starter
+// CPSY 300 Team Project, Phase 2 — GIVEN CODE. Copy this file into your repository exactly where the starter
 // zip puts it. You may change it, but explain any change in your report.
+
+"use client";
 
 import { useState } from "react";
 import {
   Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
-import type { Insights } from "@/lib/insights";
+import type { Insights } from "@/lib/types";
 
 const COLORS = { protein: "#2563eb", carbs: "#f59e0b", fat: "#10b981", ratio: "#7c3aed", cuisine: "#0891b2" };
 
