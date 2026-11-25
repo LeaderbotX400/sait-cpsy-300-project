@@ -52,7 +52,7 @@
 #
 # Usage:
 #   ./setup-azure.sh [up|down] --team kale --github <owner>/cpsy300-kale \
-#       [--location canadacentral] [--title "Kale's recipe insights"] \
+#       [--location canadacentral] [--cosmos-location westus3] [--title "Kale's recipe insights"] \
 #       [--repo-dir ~/cpsy300/cpsy300-kale] [--set-gh-secrets]
 #       [--digits 7315] [--yes] [--deploy-api] [--upload-csv]
 
@@ -64,6 +64,7 @@ export MSYS_NO_PATHCONV=1
 TEAM="eric"
 GITHUB_REPO="LeaderbotX400/sait-cpsy-300-project"
 LOCATION="canadacentral"
+COSMOS_LOCATION=""
 TITLE=""
 REPO_DIR="."
 SET_GH_SECRETS=false
@@ -86,6 +87,7 @@ while [[ $# -gt 0 ]]; do
     --team)           TEAM="${2:-}"; shift 2 ;;
     --github)         GITHUB_REPO="${2:-}"; shift 2 ;;
     --location)       LOCATION="${2:-}"; shift 2 ;;
+    --cosmos-location) COSMOS_LOCATION="${2:-}"; shift 2 ;;
     --title)          TITLE="${2:-}"; shift 2 ;;
     --repo-dir)       REPO_DIR="${2:-}"; shift 2 ;;
     --set-gh-secrets) SET_GH_SECRETS=true; shift ;;
@@ -418,6 +420,11 @@ ensure_role() {  # principal-id scope role
 # ---------------------------------------------------------------- P2-1
 step "P2-1 · Cosmos DB $COSMOS"
 SERVERLESS=false
+# A refused create leaves a "Failed" account that holds the name in every region: remove it first.
+if [[ "$(azq cosmosdb show -n "$COSMOS" -g "$RG" --query provisioningState -o tsv 2>/dev/null)" == "Failed" ]]; then
+  echo "  removing the failed account left by an earlier refused create ..."
+  az cosmosdb delete -n "$COSMOS" -g "$RG" --yes -o none
+fi
 if az cosmosdb show -n "$COSMOS" -g "$RG" -o none 2>/dev/null; then
   echo "  exists"
   [[ "$(azq cosmosdb show -n "$COSMOS" -g "$RG" --query "length(capabilities[?name=='EnableServerless'])" -o tsv)" != "0" ]] && SERVERLESS=true
@@ -429,9 +436,14 @@ else
     echo "  another account in this subscription already has the free tier: using Serverless (say so in the report)"
   fi
   echo "  creating (5-10 minutes) ..."
+  # Cosmos DB can be refused for capacity in a region; --cosmos-location puts it elsewhere.
+  CL="${COSMOS_LOCATION:-$LOCATION}"
   if ! az cosmosdb create -n "$COSMOS" -g "$RG" --kind GlobalDocumentDB "${MODE_FLAGS[@]}" \
-         --locations regionName="$LOCATION" failoverPriority=0 isZoneRedundant=False -o none; then
-    echo "  $LOCATION refused; trying canadaeast (any region works)"
+         --locations regionName="$CL" failoverPriority=0 isZoneRedundant=False -o none; then
+    echo "  $CL refused; trying canadaeast (any region works; or pass --cosmos-location)"
+    if az cosmosdb show -n "$COSMOS" -g "$RG" -o none 2>/dev/null; then
+      az cosmosdb delete -n "$COSMOS" -g "$RG" --yes -o none
+    fi
     az cosmosdb create -n "$COSMOS" -g "$RG" --kind GlobalDocumentDB "${MODE_FLAGS[@]}" \
       --locations regionName=canadaeast failoverPriority=0 isZoneRedundant=False -o none
   fi
@@ -504,7 +516,7 @@ else
 fi
 az functionapp identity assign -n "$FN" -g "$RG" -o none
 FN_ID=$(azq functionapp identity show -n "$FN" -g "$RG" --query principalId -o tsv)
-FNHOST=$(azq functionapp show -n "$FN" -g "$RG" --query defaultHostName -o tsv)
+FNHOST=$(azq functionapp show -n "$FN" -g "$RG" --query "defaultHostName || properties.defaultHostName" -o tsv)
 echo "  identity: $FN_ID"
 echo "  address:  https://$FNHOST"
 # The brief wants Application Insights on. Flex normally creates it; make sure.
