@@ -43,7 +43,7 @@ export async function storeReview(message: unknown, context: InvocationContext):
     return;
   }
   await getStore().saveReview(review); // id = message id, so a redelivered message overwrites itself
-  context.log(`stored review messageId=${messageId} recipeId=${review.recipeId} rating=${review.rating} deliveryCount=${context.triggerMetadata?.deliveryCount}`);
+  context.log(`saved review messageId=${messageId} recipeId=${review.recipeId} rating=${review.rating} deliveryCount=${context.triggerMetadata?.deliveryCount}`);
 }
 
 app.serviceBusQueue("storeReview", { connection: "ServiceBusConnection", queueName: "reviews", handler: storeReview });
